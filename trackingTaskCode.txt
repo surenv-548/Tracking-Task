@@ -1,0 +1,585 @@
+classdef TrackingTaskGUI < matlab.apps.AppBase
+
+    % Properties that correspond to app components
+    properties (Access = public)
+        UIFigure                     matlab.ui.Figure
+        ModeDropDown                 matlab.ui.control.DropDown
+        ModeDropDownLabel            matlab.ui.control.Label
+        FrameRateDropDown            matlab.ui.control.DropDown
+        FrameRateDropDownLabel       matlab.ui.control.Label
+        PathDropDown                 matlab.ui.control.DropDown
+        PathDropDownLabel            matlab.ui.control.Label
+        ReadyLamp                    matlab.ui.control.Lamp
+        ReadyLampLabel               matlab.ui.control.Label
+        TrackingTask10Label          matlab.ui.control.Label
+        BeginButton                  matlab.ui.control.Button
+        TaskConfigurationsLabel      matlab.ui.control.Label
+        blockNum                     matlab.ui.control.EditField
+        BlockEditFieldLabel          matlab.ui.control.Label
+        subjectNum                   matlab.ui.control.EditField
+        SubjectEditFieldLabel        matlab.ui.control.Label
+        ParticipantInformationLabel  matlab.ui.control.Label
+    end
+
+    
+    methods (Access = private)
+
+        function TrackingTask(app)
+            % %PTB Setup
+            [win,rect,ifi] = initializePTB(app);
+            showInstructions(app,win);
+
+            %Wait for space-bar press to start program
+            KbReleaseWait;
+            while true
+                [keyIsDown,~,keyCode] = KbCheck;
+                if keyIsDown && keyCode(KbName('SPACE'))
+                    break
+                end
+            end
+            KbReleaseWait;
+
+            %---------------Experimental Section-----------------------------
+
+
+            
+            %Frame Rate Properties
+            frameRate = str2double(app.FrameRateDropDown.Value);
+            frameDuration = 1/frameRate;
+
+            %Camera Properties
+            cameraX = 0;
+            cameraY = 0;
+            cameraZ = 0;
+            maxSpeed = 5000;
+
+
+
+            % Background Dots Properties
+            b_dotSize = 5;
+            b_dotColor = [0.35, 0.81, 0.96];
+            numBgDots = 10000;
+
+            % Global Boundaries
+            worldMin = -20000;
+            worldMax =  20000;
+            bgDotsX = worldMin + (worldMax - worldMin) * rand(numBgDots, 1);
+            bgDotsY = worldMin + (worldMax - worldMin) * rand(numBgDots, 1);
+            bgDotsZ = worldMin + (worldMax - worldMin) * rand(numBgDots, 1);
+
+            % Cross-hair Properties
+            crsHr_height = 100;
+            crsHr_color = [255,255,255];
+            crsHr_thickness = 4;
+
+            %Target Properties
+            targetSize = 20;
+            % Read target image and draw it as a texture on screen
+            [targetImg,~,targetAlpha] = imread('food_0001_sphere_300.png');
+            if ~isempty(targetAlpha)
+                targetImg(:,:,4) = targetAlpha;
+            end
+            targetTexture = Screen('MakeTexture', win, targetImg);
+            [imgHeight,imgWidth,~] = size(targetImg);
+            imgAspect = imgWidth/imgHeight;
+            %read selected random motion files from folder
+            appFolder = fileparts(mfilename('fullpath'));
+
+            motionFolder = fullfile(appFolder,'10 Random Motions');
+
+            rmp = readtable(fullfile(motionFolder,sprintf('rmp_%s',app.PathDropDown.Value)));
+            
+            [xTarget,yTarget] = randomMotion(app,rmp);
+            zTarget = 500;
+            refDistance = 800;
+            targetBaseSize = targetSize;
+            minTargetSize = 4;
+            maxTargetSize = 150;
+
+            %Task Mode
+            taskMode = app.ModeDropDown.Value;
+
+            %Real-Time average FPS calculation variables
+            motionFPSBuffer = [];
+            avgMotionFPS = 0;
+
+            %Frame Skipping Variables
+            lastMotionTime = GetSecs; %Time stamp of last frame flip
+            motionCounter = 1;
+            
+            %Controller description
+            joy = vrjoystick(1);   % 1 = first joystick detected
+            throttle = vrjoystick(2);
+            [xCenter, yCenter] = RectCenter(rect); %define the center coordinates of the screen based on screen dimensions
+            %Hide the cursor and set the control to the center of the screen
+            HideCursor;
+            SetMouse(xCenter, yCenter, win);
+            % Screen('Flip', win);
+
+            %Task timing
+            taskDuration = 60;
+            taskStartTime = GetSecs;
+            
+            %Initialize data struct
+            data = struct([]);
+
+            %Font properties
+            Screen('TextSize',win,20);
+            Screen('TextFont',win,'Arial');
+
+            %
+            pathSampleRate = (length(xTarget)-1)/taskDuration; %480Hz
+            pathSampleStep = round(pathSampleRate / frameRate);
+            dt=0;
+
+            vbl = Screen('Flip', win);
+            %MAIN LOOP
+            while true
+                timeRemaining = max(0, taskDuration - (GetSecs - taskStartTime));
+                elapsedTime = taskDuration - timeRemaining;
+                timerText = sprintf('Time Remaining = %.1f s', timeRemaining);
+                DrawFormattedText(win,timerText,rect(3)-1200,30,[255,255,255]);
+                %End the trial once task duration is met
+                if GetSecs - taskStartTime >= taskDuration
+                    break;
+                end
+
+    
+                %Display Expected frame rate
+                expectedFrameRate = sprintf('Expected Frame Rate = %d FPS \n',frameRate);
+                DrawFormattedText(win,expectedFrameRate,rect(3)-700,30,[255,255,255]);
+
+                %Display Actual Frame Rate
+                RealFPS = sprintf('Real Frame Rate = %.2f FPS \n',avgMotionFPS);
+                DrawFormattedText(win,RealFPS,rect(3)-300,30,[255,255,255]);
+
+                %Continously check for 'esc' press to exit program
+                [keyIsDown, ~, keyCode] = KbCheck;
+                if keyIsDown && keyCode(KbName('ESCAPE'))
+                    break;
+                end
+                
+                [avgMotionFPS,motionFPSBuffer,lastMotionTime] = updateFPS(app,motionFPSBuffer,lastMotionTime);
+
+
+                % motionCounter = motionCounter + pathStep;
+                % motionCounter = min(motionCounter, length(xTarget));
+                motionCounter = floor(elapsedTime * pathSampleRate) + 1;                
+                motionCounter = min(motionCounter,length(xTarget));
+
+                % [jx,jy,throttleNorm] = readControls(app,joy,throttle);
+                % 
+                % [cameraX,cameraY,cameraZ] = updateCamera(app,cameraX,cameraY,jx,jy,throttleNorm,sensitivity,dt);
+                [direction,currentSpeed] = readControls(app,joy,throttle,maxSpeed,taskMode);
+
+                [cameraX,cameraY,cameraZ] = updateCamera(app,cameraX,cameraY,cameraZ,direction,currentSpeed,dt);
+
+                switch taskMode
+                    case 'Lateral'
+                        trueTargetZ = 500;
+                    case 'Depth'
+                        trueTargetZ = 500 + yTarget(motionCounter);
+                end
+                distance = trueTargetZ - cameraZ;
+                distance = max(distance,1);
+                apparentSize = targetBaseSize * (refDistance/distance);
+                apparentSize = min(max(apparentSize, minTargetSize), maxTargetSize);
+
+                [visibleDots,visibleSizes] = projectBackgroundDots(app,bgDotsX,bgDotsY,bgDotsZ,cameraX,cameraY,cameraZ,xCenter,yCenter,rect,refDistance,b_dotSize);
+                [screen_targetX,screen_targetY,zTarget,targetWorldX,targetWorldY,targetWorldZ] = updateTargetPosition(app,taskMode,xTarget,yTarget,zTarget,motionCounter,cameraX,cameraY,cameraZ,xCenter,yCenter);
+
+
+
+                destWidth = apparentSize * 2;
+                destHeight = destWidth/imgAspect;
+                destRect = CenterRectOnPointd([0 0 destWidth destHeight], screen_targetX, screen_targetY);
+
+
+
+                Screen('DrawDots', win, visibleDots, visibleSizes, b_dotColor, [], 2); % Draw background dots
+
+
+                Screen('DrawTexture', win, targetTexture, [], destRect);
+
+                %Draw crosshair
+                DrawCrossHair(app,crsHr_height,crsHr_height,crsHr_color, crsHr_thickness,xCenter,yCenter,win);
+                data = logData(app,data,frameRate,screen_targetX,screen_targetY,targetWorldX,targetWorldY,targetWorldZ,distance,cameraX,cameraY,cameraZ,elapsedTime,xCenter,yCenter,crsHr_height);
+
+                
+                previousVbl = vbl;
+
+                vbl = Screen('Flip',win,previousVbl+frameDuration-0.5*ifi);
+
+
+                dt = vbl - previousVbl;
+
+
+
+            end
+
+            T = struct2table(data);
+            writetable(T, 'output_data.csv');
+            Screen('Close', targetTexture);
+            sca;
+
+        end
+
+        function data = logData(app,data,frameRate,screen_targetX,screen_targetY,targetWorldX,targetWorldY,targetWorldZ,distance,cameraX,cameraY,cameraZ,elapsedTime,xCenter,yCenter,crsHr_height)
+            idx = numel(data) + 1;
+
+            data(idx).SubjectNum = app.subjectNum.Value;
+            data(idx).blockNum   = app.blockNum.Value;
+            data(idx).frameRate  = frameRate;
+            data(idx).randomMotionPath = app.PathDropDown.Value;
+            data(idx).taskMode = app.ModeDropDown.Value;
+
+            data(idx).TimeStamp = elapsedTime;
+            data(idx).Txi = targetWorldX;
+            data(idx).Tyi = targetWorldY;
+            data(idx).Tzi = targetWorldZ;
+
+            data(idx).Cxi = cameraX;
+            data(idx).Cyi = cameraY;
+            data(idx).Czi = cameraZ;
+
+            % Tracking error (world coordinates)
+            data(idx).ErrorX = targetWorldX - cameraX;
+            data(idx).ErrorY = targetWorldY - cameraY;
+            data(idx).ErrorZ = targetWorldZ - cameraZ;
+
+            data(idx).onTarget = app.checkTarget(screen_targetX,screen_targetY,xCenter,yCenter,crsHr_height,crsHr_height);
+        end
+
+        function showInstructions(~,win)
+            %Start Screen
+            startText = ['Welcome to the Tracking Task \n\n' ...
+                'Move the mouse to control the cross-hair\n'...
+                'Track the dot and attempt to keep it in the white rectangular borders of the crosshair \n\n' ...
+                'Press Space to begin']; %Instructional text
+            Screen('TextSize',win,40);
+            Screen('TextFont',win,'Arial');
+            DrawFormattedText(win,startText,'center','center',[0,1,0]); %Draws text on screen in green
+            Screen('Flip',win);
+        end
+
+        function [win,rect,ifi] = initializePTB(~)
+            %PTB Setup
+            Screen('Preference', 'ConserveVRAM', 4096);
+            Screen('Preference', 'SkipSyncTests', 1); %Setting to skip synching test, 0-to enable, 1-to skip
+            Screen('Preference', 'VisualDebugLevel', 0);
+            KbName('UnifyKeyNames');
+            PsychDefaultSetup(2);
+            screenID = max(Screen('Screens')); %Retrieve screen ID of the secondary display.
+            % PsychDebugWindowConfiguration(0,0.5);
+            [win, rect] = PsychImaging('OpenWindow', screenID, [0 0 0]);
+            Screen('BlendFunction', win, GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);%Anti-aliasing and transparency
+            ifi = Screen('GetFlipInterval', win); %Inter Frame Interval. Measures exact duration of a single frame on monitor in seconds.
+
+        end
+
+        
+        function [avgMotionFPS,motionFPSBuffer,lastMotionTime] = updateFPS(~,motionFPSBuffer,lastMotionTime)
+            currentMotionTime = GetSecs;
+
+            motionInterval = currentMotionTime - lastMotionTime;
+            lastMotionTime = currentMotionTime;
+
+            if motionInterval > 0
+                instantMotionFPS = 1/motionInterval;
+                motionFPSBuffer(end+1) = instantMotionFPS;
+
+                if numel(motionFPSBuffer) > 20
+                    motionFPSBuffer(1) = [];
+                end
+                avgMotionFPS = mean(motionFPSBuffer);
+            end
+        end
+
+        function [direction,currentSpeed] = readControls(~,joy,throttle,maxSpeed,taskMode)
+            % Read all axes and buttons
+            axesJoy = read(joy);
+            [axesThrottle] = read(throttle);
+            jx = axesJoy(1);   % X axis (left/right)
+
+            switch taskMode
+                case 'Lateral'
+                    jy = -axesJoy(2);   % Y axis (forward/back)
+                    jz = 0;
+                case 'Depth'
+                    % Typical Warthog mapping:
+                    jy = 0;
+                    jz = -axesJoy(2);   % Y axis (forward/back)
+                    
+            end
+            direction = [jx,jy,jz];
+            speedCommand = (1 - axesThrottle(3))/2;
+            currentSpeed = speedCommand*maxSpeed;
+            mag = norm(direction);
+
+            if mag > 0.03
+                direction = direction ./mag;
+            else
+                direction = [0 0 0];
+            end
+
+        end
+
+        function [cameraX,cameraY,cameraZ] = updateCamera(~,cameraX,cameraY,cameraZ,direction,currentSpeed,dt)
+            % Apply movement
+            cameraX = cameraX + direction(1) * currentSpeed*dt;
+            cameraY = cameraY + direction(2) * currentSpeed*dt;
+            cameraZ = cameraZ + direction(3) * currentSpeed*dt;
+        end
+
+        function [visibleDots,visibleSizes] = projectBackgroundDots(~,bgDotsX,bgDotsY,bgDotsZ,cameraX,cameraY,cameraZ,xCenter,yCenter,rect,refDistance,b_dotSize)
+            %Convert background dots to screen coordinates
+            relX = bgDotsX - cameraX;
+            relY = bgDotsY   - cameraY;
+            relZ = bgDotsZ - cameraZ;
+            relZ = max(relZ,1);
+
+            scale = refDistance ./ relZ;
+
+            screen_b_DotsX = xCenter + relX .* scale;
+            screen_b_DotsY = yCenter + relY .* scale;
+
+            dotSizes = b_dotSize .* scale;
+            dotSizes = max(dotSizes, 1);          % prevent too-small dots
+            dotSizes = min(dotSizes, 150);        % optional: prevent giant dots
+
+
+            %Only draw background dots that are on-screen to optimize
+            %performance
+            onScreen = screen_b_DotsX > 0 & screen_b_DotsX < rect(3) & screen_b_DotsY > 0 & screen_b_DotsY < rect(4); %background dots must stay within the x and y boundaries of the screen
+            visibleDots = [screen_b_DotsX(onScreen)'; screen_b_DotsY(onScreen)'];
+            visibleSizes = dotSizes(onScreen);
+        end
+
+        function [screen_targetX,screen_targetY,zTarget,targetWorldX,targetWorldY,targetWorldZ] = updateTargetPosition(~,taskMode,xTarget,yTarget,zTarget,motionCounter,cameraX,cameraY,cameraZ,xCenter,yCenter)
+            %Draw target centered on the screen
+            switch taskMode
+                case 'Lateral'
+                    % World coordinates
+                    targetWorldX = xTarget(motionCounter);
+                    targetWorldY = yTarget(motionCounter);
+                    targetWorldZ = 500;
+                    % Screen coordinates
+                    screen_targetX = xCenter + xTarget(motionCounter) - cameraX;
+                    screen_targetY = yCenter + yTarget(motionCounter) - cameraY;
+                    zTarget = zTarget - cameraZ;
+
+                case 'Depth'
+                    % World coordinates
+                    targetWorldX = xTarget(motionCounter);
+                    targetWorldY = 0;
+                    targetWorldZ = 500 + yTarget(motionCounter);
+                    %Screen Coordinates
+                    screen_targetX = xCenter + xTarget(motionCounter) - cameraX;
+                    screen_targetY = yCenter - cameraY;
+                    zTarget = 500 + yTarget(motionCounter)-cameraZ;
+            end
+        end
+        
+
+        function DrawCrossHair(~,width, height, color, thickness, xCenter, yCenter, win)
+            halfW = width/2;
+            halfH = height/2;
+
+            % How far the corner brackets extend along each edge (tune this ratio)
+            bracketLenX = halfW * 0.6;
+            bracketLenY = halfH * 0.6;
+
+            % How far the crosshair lines extend beyond the square
+            lineExtentX = halfW * 1.4;
+            lineExtentY = halfH * 1.4;
+
+            % --- Full horizontal line (passes through, extends past square) ---
+            Screen('DrawLine', win, color, ...
+                xCenter - lineExtentX, yCenter, ...
+                xCenter + lineExtentX, yCenter, thickness);
+
+            % --- Full vertical line (passes through, extends past square) ---
+            Screen('DrawLine', win, color, ...
+                xCenter, yCenter - lineExtentY, ...
+                xCenter, yCenter + lineExtentY, thickness);
+
+            % --- Top-left bracket ---
+            Screen('DrawLine', win, color, xCenter - halfW, yCenter - halfH, xCenter - halfW + bracketLenX, yCenter - halfH, thickness); % top edge
+            Screen('DrawLine', win, color, xCenter - halfW, yCenter - halfH, xCenter - halfW, yCenter - halfH + bracketLenY, thickness); % left edge
+
+            % --- Top-right bracket ---
+            Screen('DrawLine', win, color, xCenter + halfW, yCenter - halfH, xCenter + halfW - bracketLenX, yCenter - halfH, thickness);
+            Screen('DrawLine', win, color, xCenter + halfW, yCenter - halfH, xCenter + halfW, yCenter - halfH + bracketLenY, thickness);
+
+            % --- Bottom-left bracket ---
+            Screen('DrawLine', win, color, xCenter - halfW, yCenter + halfH, xCenter - halfW + bracketLenX, yCenter + halfH, thickness);
+            Screen('DrawLine', win, color, xCenter - halfW, yCenter + halfH, xCenter - halfW, yCenter + halfH - bracketLenY, thickness);
+
+            % --- Bottom-right bracket ---
+            Screen('DrawLine', win, color, xCenter + halfW, yCenter + halfH, xCenter + halfW - bracketLenX, yCenter + halfH, thickness);
+            Screen('DrawLine', win, color, xCenter + halfW, yCenter + halfH, xCenter + halfW, yCenter + halfH - bracketLenY, thickness);
+        end
+
+        function [x,y] = randomMotion(~,motionFile)
+            x = motionFile.X*200;
+            y = motionFile.Y*200;
+        end
+
+        function isOnTarget = checkTarget(~,targetX,targetY,xCenter,yCenter,crsHairHeight,crsHairWidth)
+            withinX = targetX < xCenter + crsHairWidth/2 && targetX > xCenter - crsHairWidth/2;
+            withinY = targetY < yCenter + crsHairHeight/2 && targetY > yCenter - crsHairHeight/2;
+            if withinX && withinY
+                isOnTarget = true;
+            else
+                isOnTarget = false;
+            end
+        end
+    end
+    
+
+    % Callbacks that handle component events
+    methods (Access = private)
+
+        % Button pushed function: BeginButton
+        function BeginButtonPushed(app, event)
+            TrackingTask(app);
+        end
+    end
+
+    % Component initialization
+    methods (Access = private)
+
+        % Create UIFigure and components
+        function createComponents(app)
+
+            % Create UIFigure and hide until all components are created
+            app.UIFigure = uifigure('Visible', 'off');
+            app.UIFigure.Position = [100 100 824 615];
+            app.UIFigure.Name = 'MATLAB App';
+
+            % Create ParticipantInformationLabel
+            app.ParticipantInformationLabel = uilabel(app.UIFigure);
+            app.ParticipantInformationLabel.FontName = 'Arial';
+            app.ParticipantInformationLabel.FontSize = 18;
+            app.ParticipantInformationLabel.FontWeight = 'bold';
+            app.ParticipantInformationLabel.Position = [41 499 221 32];
+            app.ParticipantInformationLabel.Text = 'Participant Information';
+
+            % Create SubjectEditFieldLabel
+            app.SubjectEditFieldLabel = uilabel(app.UIFigure);
+            app.SubjectEditFieldLabel.HorizontalAlignment = 'right';
+            app.SubjectEditFieldLabel.Position = [41 469 55 22];
+            app.SubjectEditFieldLabel.Text = 'Subject #';
+
+            % Create subjectNum
+            app.subjectNum = uieditfield(app.UIFigure, 'text');
+            app.subjectNum.Position = [111 469 100 22];
+
+            % Create BlockEditFieldLabel
+            app.BlockEditFieldLabel = uilabel(app.UIFigure);
+            app.BlockEditFieldLabel.HorizontalAlignment = 'right';
+            app.BlockEditFieldLabel.Position = [228 469 44 22];
+            app.BlockEditFieldLabel.Text = 'Block #';
+
+            % Create blockNum
+            app.blockNum = uieditfield(app.UIFigure, 'text');
+            app.blockNum.Position = [287 469 100 22];
+
+            % Create TaskConfigurationsLabel
+            app.TaskConfigurationsLabel = uilabel(app.UIFigure);
+            app.TaskConfigurationsLabel.FontName = 'Arial';
+            app.TaskConfigurationsLabel.FontSize = 18;
+            app.TaskConfigurationsLabel.FontWeight = 'bold';
+            app.TaskConfigurationsLabel.Position = [41 425 178 23];
+            app.TaskConfigurationsLabel.Text = 'Task Configurations';
+
+            % Create BeginButton
+            app.BeginButton = uibutton(app.UIFigure, 'push');
+            app.BeginButton.ButtonPushedFcn = createCallbackFcn(app, @BeginButtonPushed, true);
+            app.BeginButton.Position = [145 40 100 23];
+            app.BeginButton.Text = 'Begin';
+
+            % Create TrackingTask10Label
+            app.TrackingTask10Label = uilabel(app.UIFigure);
+            app.TrackingTask10Label.FontName = 'Arial';
+            app.TrackingTask10Label.FontSize = 36;
+            app.TrackingTask10Label.FontWeight = 'bold';
+            app.TrackingTask10Label.Position = [41 543 307 47];
+            app.TrackingTask10Label.Text = 'Tracking Task 1.0';
+
+            % Create ReadyLampLabel
+            app.ReadyLampLabel = uilabel(app.UIFigure);
+            app.ReadyLampLabel.HorizontalAlignment = 'right';
+            app.ReadyLampLabel.Position = [47 41 40 22];
+            app.ReadyLampLabel.Text = 'Ready';
+
+            % Create ReadyLamp
+            app.ReadyLamp = uilamp(app.UIFigure);
+            app.ReadyLamp.Position = [102 41 20 20];
+
+            % Create PathDropDownLabel
+            app.PathDropDownLabel = uilabel(app.UIFigure);
+            app.PathDropDownLabel.HorizontalAlignment = 'right';
+            app.PathDropDownLabel.Position = [287 387 30 22];
+            app.PathDropDownLabel.Text = 'Path';
+
+            % Create PathDropDown
+            app.PathDropDown = uidropdown(app.UIFigure);
+            app.PathDropDown.Items = {'1', '2', '3', '4', '5', '6', '7', '9', '10'};
+            app.PathDropDown.Position = [332 387 100 22];
+            app.PathDropDown.Value = '1';
+
+            % Create FrameRateDropDownLabel
+            app.FrameRateDropDownLabel = uilabel(app.UIFigure);
+            app.FrameRateDropDownLabel.HorizontalAlignment = 'right';
+            app.FrameRateDropDownLabel.Position = [41 387 68 22];
+            app.FrameRateDropDownLabel.Text = 'Frame Rate';
+
+            % Create FrameRateDropDown
+            app.FrameRateDropDown = uidropdown(app.UIFigure);
+            app.FrameRateDropDown.Items = {'60', '120', '240', '480'};
+            app.FrameRateDropDown.Position = [124 387 100 22];
+            app.FrameRateDropDown.Value = '60';
+
+            % Create ModeDropDownLabel
+            app.ModeDropDownLabel = uilabel(app.UIFigure);
+            app.ModeDropDownLabel.HorizontalAlignment = 'right';
+            app.ModeDropDownLabel.Position = [463 387 35 22];
+            app.ModeDropDownLabel.Text = 'Mode';
+
+            % Create ModeDropDown
+            app.ModeDropDown = uidropdown(app.UIFigure);
+            app.ModeDropDown.Items = {'Lateral', 'Depth'};
+            app.ModeDropDown.Position = [513 387 100 22];
+            app.ModeDropDown.Value = 'Lateral';
+
+            % Show the figure after all components are created
+            app.UIFigure.Visible = 'on';
+        end
+    end
+
+    % App creation and deletion
+    methods (Access = public)
+
+        % Construct app
+        function app = TrackingTaskGUI
+
+            % Create UIFigure and components
+            createComponents(app)
+
+            % Register the app with App Designer
+            registerApp(app, app.UIFigure)
+
+            if nargout == 0
+                clear app
+            end
+        end
+
+        % Code that executes before app deletion
+        function delete(app)
+
+            % Delete UIFigure when app is deleted
+            delete(app.UIFigure)
+        end
+    end
+end
